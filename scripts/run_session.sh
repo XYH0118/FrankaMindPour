@@ -46,8 +46,8 @@ usage() {
   echo "  ./scripts/run_session.sh stage:=udp"
   echo ""
   echo "Simulated commands, from this PC (any stage but move):"
-  echo "  python3 scripts/fmp_udp_sender.py --host 127.0.0.1 --pattern=1:1    # 1 s clockwise"
-  echo "  python3 scripts/fmp_udp_sender.py --host 127.0.0.1 --pattern=-1:1   # 1 s anti-clockwise"
+  echo "  python3 scripts/fmp_udp_sender.py --udp-only --host 127.0.0.1 --pattern=1:1"
+  echo "  python3 scripts/fmp_udp_sender.py --udp-only --host 127.0.0.1 --pattern=-1:1"
   echo ""
   echo "Everything else (start pose, speed, limits, UDP port) is in"
   echo "franka_mind_pour/config/mind_pour.yaml."
@@ -153,5 +153,7 @@ FMP_PID=$!
 
 # The launch file ends by itself when the session is complete.
 wait $FMP_PID
+FMP_EXIT_CODE=$?
 # Remove ANSI escape sequences from ROS log files
 find ~/.ros/log/latest/ -type f -name "*.log" -exec sed -i 's/\x1b\[[0-9;]*m//g' {} \;
+exit "$FMP_EXIT_CODE"

@@ -11,6 +11,8 @@ Packets that arrive after a newer one are dropped, since only the latest
 command matters to the controller. Losses are counted from gaps in seq.
 """
 
+import os
+from pathlib import Path
 import socket
 
 import rospy
@@ -43,6 +45,10 @@ def main():
     sock.bind((bind_address, port))
     # So the loop notices rospy shutdown while no packets are coming in.
     sock.settimeout(0.5)
+    status_dir = os.environ.get('FMP_STATUS_DIR')
+    accept_commands = Path(status_dir) / 'accept_commands' if status_dir else None
+    if status_dir:
+        (Path(status_dir) / 'bridge_ready').touch()
     rospy.loginfo('udp_bridge: listening on %s:%d, publishing on %s',
                   bind_address, port, command_topic)
 
@@ -55,6 +61,9 @@ def main():
         except socket.timeout:
             continue
         stamp = rospy.Time.now()
+        # Never retain a command received while the robot is moving to start.
+        if accept_commands is not None and not accept_commands.exists():
+            continue
 
         try:
             seq, command, sender_time = parse(data)
@@ -91,6 +100,7 @@ def main():
 
     rospy.loginfo('udp_bridge: %d packets published, %d lost, %d late (dropped), %d malformed',
                   received, lost, late, malformed)
+    sock.close()
 
 
 if __name__ == '__main__':

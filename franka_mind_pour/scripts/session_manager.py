@@ -18,6 +18,7 @@ import csv
 import datetime
 import math
 import os
+from pathlib import Path
 import sys
 
 import rospy
@@ -100,6 +101,7 @@ class TrialMonitor:
 
     def __init__(self):
         self.done = False
+        self.waiting = False
         self.trial_time = None
         self.max_clockwise = 0.0
         self.max_anti_clockwise = 0.0
@@ -109,6 +111,8 @@ class TrialMonitor:
     def _callback(self, msg):
         if self.done:
             return
+        if msg.state == PourState.STATE_WAITING:
+            self.waiting = True
         self.max_clockwise = max(self.max_clockwise, msg.angle)
         self.max_anti_clockwise = max(self.max_anti_clockwise, -msg.angle)
         if msg.state == PourState.STATE_DONE:
@@ -166,9 +170,17 @@ def main():
     if not switch_to_pour_controller():
         rospy.logerr('session_manager: could not switch to %s', POUR_CONTROLLER)
         return 1
-    rospy.loginfo('session_manager: READY - waiting for EEG commands')
-
     rate = rospy.Rate(20)
+    status_dir = os.environ.get('FMP_STATUS_DIR')
+    if status_dir:
+        # A successful switch alone does not prove update() is publishing.
+        while not rospy.is_shutdown() and not monitor.waiting and not monitor.done:
+            rate.sleep()
+        if rospy.is_shutdown() or monitor.done:
+            rospy.logerr('session_manager: controller did not enter WAITING')
+            return 1
+        (Path(status_dir) / 'controller_ready').touch()
+    rospy.loginfo('session_manager: READY - waiting for EEG commands')
     while not rospy.is_shutdown() and not monitor.done:
         rate.sleep()
     if not monitor.done:
@@ -185,6 +197,8 @@ def main():
                   results_file)
     # Let the bag catch the final samples before the launch file shuts down.
     rospy.sleep(post_trial_record_sec)
+    if status_dir:
+        (Path(status_dir) / 'completed').touch()
     rospy.loginfo('session_manager: session complete, shutting down')
     return 0
 

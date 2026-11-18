@@ -55,7 +55,7 @@ The two PCs share a direct Ethernet cable. On this PC that link appears to be `e
 3. If `ufw` is enabled here, allow the port: `sudo ufw allow in on eno1 to any port 5005 proto udp`.
 4. Test end to end. Copy `scripts/fmp_udp_sender.py` to Windows, then:
    - on Ubuntu: `roscore` & `rosrun franka_mind_pour udp_bridge.py`, then `rostopic echo /mind_pour/command`
-   - on Windows: `python fmp_udp_sender.py --host 192.168.50.2`
+   - on Windows: `python fmp_udp_sender.py --udp-only --host 192.168.50.2`
 
 ## Sending commands from the EEG pipeline (Windows, Python)
 
@@ -69,12 +69,90 @@ sender = CommandSender('192.168.50.2', 5005)
 sender.send(CLOCKWISE)
 ```
 
-Run directly, it plays a scripted pattern, which is useful for a full session without EEG. By
-default it turns clockwise for 2 s and back for 2 s, which completes a trial:
+Run directly, it now connects to the experiment manager, requests participant/session IDs,
+waits for `READY`, and plays a scripted pattern. By default it turns clockwise for 2 s and
+back for 2 s. Use `--udp-only` when testing an independently launched session or UDP bridge:
 
 ```bash
 python fmp_udp_sender.py --host 192.168.50.2 --pattern "0:1,1:2,0:1,-1:2,0:2"
 ```
+
+## Repeated experiments from Windows
+
+Build the updated package on Ubuntu, then start the persistent manager from the repository root:
+
+```bash
+./scripts/compile_package.sh
+python3 scripts/experiment_manager.py --host 192.168.50.2
+```
+
+The manager listens on **TCP 5006**. It starts a new full `run_session.sh` for every accepted
+participant/session pair; do not separately launch another session. Starting the manager alone
+does not move the robot. An accepted START does: the arm first travels to its configured pose.
+If `ufw` is enabled, also allow TCP 5006 on the Windows link:
+`sudo ufw allow in on eno1 to any port 5006 proto tcp`.
+
+On Windows, keep `fmp_udp_keyboard.bat`, `fmp_udp_keyboard.py`, and `fmp_udp_sender.py` together
+(copies are in `scripts/`). Double-click the batch file, or run:
+
+```powershell
+python fmp_udp_keyboard.py --host 192.168.50.2
+```
+
+1. Enter a participant such as `P01`, then a session such as `0` (nonnegative integer).
+2. Wait for `READY`. No UDP commands are sent before this response. It requires the start pose,
+   a running controller publishing WAITING, and a bound UDP bridge.
+3. Hold **1** for clockwise or **2** for anti-clockwise. Release to send **0**. Holding 0,
+   holding 1 and 2 together, or changing window focus also sends 0. These keys need no Enter.
+4. Send the opposite direction to return joint 7, then release the key near its starting angle.
+   **0 only stops; it does not return the arm automatically.** After task completion, result
+   writing, the final recording delay and child shutdown, `DONE` arrives and ID prompts return.
+5. At an ID prompt, enter **Q** to finish the experiment. During control, **Q/Esc** requests
+   finish after this trial; keep using 1/2 to complete the return. Ctrl+C exits the local client
+   and attempts stop packets, without declaring the experiment complete.
+
+`--participant P01 --session 0` supplies the first pair without prompts. `--once` exits the
+client after one trial while leaving the manager listening. `--udp-only` preserves the old
+keyboard-only UDP test. Pattern testing uses the same handshake via `fmp_udp_sender.py`.
+`--trial-timeout <seconds>` optionally limits client waiting after READY; it stops UDP sending
+on expiry, without marking the unfinished Ubuntu trial complete.
+
+### Management protocol
+
+TCP messages are ASCII, each terminated by `\n` (maximum 1024 bytes including newline).
+UDP 5005 keeps `sequence,command,sender_time\n`, normally at 50 Hz.
+
+| TCP message | Meaning |
+| --- | --- |
+| `START,r001,P01,0` | Start a named trial; request IDs use 1–64 letters/digits/underscores/hyphens, excluding `-` alone |
+| `STARTING,r001,P01,0` | Accepted; preparing the robot |
+| `READY,r001,P01,0` | Begin UDP commands |
+| `DONE,r001,P01,0` | Successful completion and child shutdown |
+| `ERROR,r001,<reason>` | Invalid request, startup failure, timeout, or unsuccessful child exit |
+| `BUSY,r002` | Another trial is active; no queue is created |
+| `STATUS,r001` | Query the latest status; also available as `python fmp_udp_sender.py --status r001` |
+| `FINISH_EXPERIMENT` | Stop accepting new trials and finish after the active trial |
+| `FINISHING` / `EXPERIMENT_FINISHED` | Finish deferred / experiment manager is exiting |
+
+Repeating an identical START with the same request ID replays its state; different metadata
+with that ID returns `request_conflict`. The ledger lasts for this manager process, not across
+restarts. Only one TCP client is connected at a time; after the first valid START, the manager
+accepts that Windows IP for subsequent connections. This restriction applies to management;
+the existing UDP bridge remains a trusted-link command receiver.
+
+If TCP disconnects, the client stops directional sending and the controller's normal 30 ms
+command expiry decelerates the joint. The manager retains the unfinished trial. Reconnect with
+`--status <original_id>` to inspect it, or supply **the original** `--request-id`, `--participant`
+and `--session` to resume that trial without starting it again. Prefer the keyboard client for
+manual recovery: the pattern client restarts its timed pattern when it receives READY.
+Do not restart the manager or choose a new request ID as a recovery shortcut.
+
+The default manager startup timeout is 120 s; `--startup-timeout` changes it. The client
+defaults to 150 s, allowing cleanup time. Startup errors are returned only after child cleanup.
+On Linux, cleanup finds detached ROS processes using their inherited per-trial environment
+marker. If cleanup cannot confirm they have stopped, the manager exits instead of accepting
+another trial. The Linux-only detached-child integration test must be run on Ubuntu; Windows
+skips it. ROS must preserve the inherited `FMP_STATUS_DIR` variable for managed sessions.
 
 ## Build / run
 
@@ -109,9 +187,9 @@ Steps 1, 3 and 4 take commands from the Windows PC or from a simulated sender on
 in a second terminal:
 
 ```bash
-python3 scripts/fmp_udp_sender.py --host 127.0.0.1 --pattern=1:1     # 1 s clockwise, about 30 deg
-python3 scripts/fmp_udp_sender.py --host 127.0.0.1 --pattern=-1:1    # 1 s anti-clockwise
-python3 scripts/fmp_udp_sender.py --host 127.0.0.1                   # 2 s there, 2 s back
+python3 scripts/fmp_udp_sender.py --udp-only --host 127.0.0.1 --pattern=1:1     # 1 s clockwise
+python3 scripts/fmp_udp_sender.py --udp-only --host 127.0.0.1 --pattern=-1:1    # 1 s anti-clockwise
+python3 scripts/fmp_udp_sender.py --udp-only --host 127.0.0.1                   # 2 s there, 2 s back
 ```
 
 Write a pattern that starts with `-1` as `--pattern=-1:1`; with a space, argparse takes it for an
@@ -173,12 +251,19 @@ franka_mind_pour/
   scripts/session_manager.py           start pose, controller switch, results row
   scripts/record_bag.sh                rosbag wrapper, creates the output dir
 scripts/
+  experiment_manager.py                persistent TCP lifecycle supervisor
+  fmp_udp_keyboard.py / .bat            Windows managed keyboard test
   compile_package.sh                   -> ~/workspace/catkin_ws_fmp
   run_session.sh                       one session
   fmp_udp_sender.py                    sender for the Windows PC / test pattern
 ```
 
 ## Status
+
+The experiment supervisor/client have robot-free integration tests. Run
+`python -m unittest discover -s tests -v` on Windows or Ubuntu. They use loopback TCP/UDP and
+fake child processes; ROS boundaries are stubbed. No coverage threshold or CI is configured.
+The new readiness handshake and actual ROS child shutdown still need Ubuntu/robot validation.
 
 The build is clean. The UDP path (sender → bridge → topic) has been tested on localhost. The
 controller logic has been checked against a fake position interface: the ramp, the ±90° limit, the

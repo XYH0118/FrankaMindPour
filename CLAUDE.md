@@ -32,18 +32,39 @@ appends a `source` line for `catkin_ws_fmp` to `~/.bashrc` and `~/.zshrc` if it 
 `build/` directory at the repo root is the VS Code CMake extension's Debug configure of
 `franka_mind_pour/` (gitignored, used for `compile_commands.json`). It is not what runs.
 
-There is no test suite and no CI. Verification is: a clean build; the UDP path tested on localhost;
-and then a real-robot session. Treat any change to `update()` as unverified until it has run on the
-robot, and say so. The fake position interface that the README's Status section mentions is not in
-the repo.
+`python -m unittest discover -s tests -v` runs standard-library tests for the experiment
+supervisor, TCP/UDP client, keyboard mapping, and ROS lifecycle boundaries. They use fake
+children and stub ROS, and never move the robot. There is no CI or coverage threshold.
+Also verify a clean catkin build and the localhost UDP path. Hardware behavior remains
+unverified until an operator tests it. The README's old fake position interface is not included.
 
 ```bash
 # UDP path without the robot, one terminal each
 ./scripts/run_session.sh stage:=udp                   # bridge + `rostopic hz`, safe to run any time
-python3 scripts/fmp_udp_sender.py --host 127.0.0.1    # default pattern: 2 s clockwise, 2 s back
+python3 scripts/fmp_udp_sender.py --udp-only --host 127.0.0.1
 ```
 
 Do not run `stage:=move`, `stage:=rotate` or a full session yourself: they move the arm.
+Do not send START to a real experiment manager either: START launches a full session.
+
+## Repeated experiment lifecycle
+
+`python3 scripts/experiment_manager.py` is the persistent standard-library TCP server
+(5006); it launches one `run_session.sh` child at a time. Windows clients use
+`START,id,P01,0`, wait for READY, then stream the unchanged UDP 5005 packets.
+DONE means the trial finished, the CSV was written and the child exited successfully.
+Identical request IDs replay status across reconnects; conflicting metadata is rejected.
+FINISH_EXPERIMENT waits for an active trial before shutting down. See README for recovery.
+
+Per-child `FMP_STATUS_DIR` links ROS nodes to the manager. The bridge writes bridge_ready
+after binding, and drops commands until accept_commands exists. session_manager writes
+controller_ready only after the switch and a WAITING sample, then completed after result
+writing and final recording delay. Without FMP_STATUS_DIR, standalone behavior is preserved.
+Keep these milestones distinct; never infer READY/DONE from text logs or process creation.
+The shell wrapper must preserve roslaunch's exit code across log cleanup.
+
+Windows tools live in root scripts/. The deployed copies requested by the user live one
+directory above this checkout and require explicit filesystem escalation to update.
 
 Code style: Google C++, `IndentWidth: 2`, `ColumnLimit: 100` (`.clang-format`). C++17.
 
