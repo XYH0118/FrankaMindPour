@@ -32,9 +32,10 @@ appends a `source` line for `catkin_ws_fmp` to `~/.bashrc` and `~/.zshrc` if it 
 `build/` directory at the repo root is the VS Code CMake extension's Debug configure of
 `franka_mind_pour/` (gitignored, used for `compile_commands.json`). It is not what runs.
 
-`python -m unittest discover -s tests -v` runs standard-library tests for the experiment
-supervisor, TCP/UDP client, keyboard mapping, and ROS lifecycle boundaries. They use fake
-children and stub ROS, and never move the robot. There is no CI or coverage threshold.
+`python -m unittest discover -s tests -v` tests the experiment supervisor, TCP/UDP client,
+keyboard mapping, and ROS lifecycle boundaries. With a C++17 compiler on `PATH`, it also
+tests joint 7 returns against fake joints. Tests use fake children and stub ROS. There is no
+CI or coverage threshold.
 Also verify a clean catkin build and the localhost UDP path. Hardware behavior remains
 unverified until an operator tests it. The README's old fake position interface is not included.
 
@@ -113,10 +114,10 @@ PC). The paths below are inside the package, `franka_mind_pour/`.
 - **Every speed change goes through `max_acceleration`,** stopping included. `stepJoint7()` also caps
   speed at `sqrt(2 a d)` to the nearer limit, so the joint comes to rest on the limit. The clamp
   after it is only a backstop. Do not command velocity steps: the FR3 rejects them.
-- **`DONE` needs all of:** `max_excursion_ >= min_excursion_`, `|q7 - q7_start| <= return_tolerance_`,
-  no active command, and `dq7_d_ == 0` exactly. The ramp lands exactly on zero, which is why the
-  equality check is safe. Without the rest condition, swinging through the start angle to the other
-  side would end the trial.
+- After the minimum measured excursion, an inward command uses the start angle as a braking
+  target. `holding_start_` prevents further motion once the setpoint reaches it. `DONE` requires
+  measured and commanded positions within `return_tolerance_`, a stopped setpoint, and either
+  `holding_start_` or a neutral command. The neutral path permits stopping manually within tolerance.
 - **`angle` in `PourState` is clockwise-positive** (`clockwise_sign * (q7 - q7_start)`). The CSV's
   max clockwise / anti-clockwise values come from it.
 - **`PourState` constants must match `ControllerState`.** The `static_assert` in `publishState()`

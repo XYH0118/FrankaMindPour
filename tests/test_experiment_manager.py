@@ -104,6 +104,33 @@ class SupervisorTests(unittest.TestCase):
                              (request, session))
         self.assertEqual(len(self.created), 2)
 
+    def test_connection_move_serializes_with_trials_and_never_enables_udp(self):
+        peer = '127.0.0.1'
+        self.mode = 'move'
+        request = 'MOVE_TO_START,home1'
+        self.assertEqual(self.manager.handle(request, peer), ['MOVING_TO_START,home1'])
+        self.assertEqual(self.created[0][0].stage, 'move')
+        self.assertEqual(self.manager.handle(request, peer), ['MOVING_TO_START,home1'])
+        self.assertEqual(self.manager.handle('START,r1,P01,0', peer), ['BUSY,r1'])
+        self.assertEqual(len(self.created), 1)
+        self.manager.tick()
+        self.assertFalse((self.created[0][1] / 'accept_commands').exists())
+        self.release()
+        self.assertEqual(self.manager.drain_events(), ['AT_START,home1'])
+        self.assertEqual(self.manager.handle(request, peer), ['AT_START,home1'])
+        self.mode = 'normal'
+        self.start_ready()
+        self.assertEqual(self.created[-1][0].stage, 'full')
+        self.assertEqual(self.manager.handle('MOVE_TO_START,home2', peer), ['BUSY,home2'])
+        self.release()
+
+    def test_connection_move_requires_positive_completion_marker(self):
+        self.mode = 'move_incomplete'
+        self.assertEqual(self.manager.handle('MOVE_TO_START,home1', '127.0.0.1'),
+                         ['MOVING_TO_START,home1'])
+        self.release()
+        self.assertEqual(self.manager.drain_events(), ['ERROR,home1,incomplete_move'])
+
     def test_ready_waits_for_both_bridge_and_controller(self):
         self.manager.handle('START,r1,P01,0', '127.0.0.1')
         self.pump_until(lambda: (self.created[0][1] / 'controller_ready').exists())

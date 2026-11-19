@@ -20,6 +20,12 @@ if mode == 'fail':
 if mode == 'hang':
     time.sleep(60)
     sys.exit(1)
+if mode in ('move', 'move_incomplete'):
+    while not (directory / 'release').exists():
+        time.sleep(0.01)
+    if mode == 'move':
+        (directory / 'completed').touch()
+    sys.exit(0)
 (directory / 'controller_ready').touch()
 time.sleep(0.08)
 (directory / 'bridge_ready').touch()

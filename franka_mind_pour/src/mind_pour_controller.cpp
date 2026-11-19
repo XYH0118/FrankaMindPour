@@ -11,6 +11,7 @@ namespace franka_mind_pour {
 namespace {
 constexpr double kDegToRad = M_PI / 180.0;
 constexpr double kRadToDeg = 180.0 / M_PI;
+constexpr double kReturnCaptureDistance = 1e-8;  // [rad], avoid snapping at the last tick
 }  // namespace
 
 bool MindPourController::init(hardware_interface::RobotHW* robot_hw, ros::NodeHandle& node_handle) {
@@ -141,6 +142,7 @@ void MindPourController::starting(const ros::Time& /*time*/) {
 
   current_state_ = ControllerState::WAITING;
   max_excursion_ = 0.0;
+  holding_start_ = false;
   elapsed_ = 0.0;
   next_state_time_ = ros::Time(0);
   ROS_INFO_STREAM("MindPourController: holding the start pose (joint 7 at "
@@ -153,14 +155,21 @@ void MindPourController::update(const ros::Time& time, const ros::Duration& peri
   // NONE (or nothing at all yet) leaves it at 0.
   const bool fresh =
       !latest.received.isZero() && (time - latest.received).toSec() <= command_hold_duration_;
-  const int8_t command =
-      (current_state_ != ControllerState::DONE && fresh) ? latest.command : PourCommand::NONE;
+  int8_t command = (current_state_ != ControllerState::DONE && !holding_start_ && fresh)
+                       ? latest.command
+                       : PourCommand::NONE;
 
   if (current_state_ == ControllerState::WAITING && command != PourCommand::NONE) {
     current_state_ = ControllerState::ROTATING;
     trial_start_time_ = time;
     ROS_INFO_STREAM("MindPourController: first rotate command (seq " << latest.seq
                                                                      << "), trial timer started");
+  }
+
+  const double offset = joint_handles_[kJoint7].getPosition() - q7_start_;
+  if (current_state_ == ControllerState::ROTATING) {
+    elapsed_ = (time - trial_start_time_).toSec();
+    max_excursion_ = std::max(max_excursion_, std::abs(offset));
   }
 
   stepJoint7(static_cast<int>(clockwise_sign_) * command, period.toSec());
@@ -170,19 +179,15 @@ void MindPourController::update(const ros::Time& time, const ros::Duration& peri
   }
   joint_handles_[kJoint7].setCommand(q7_d_);
 
-  const double offset = joint_handles_[kJoint7].getPosition() - q7_start_;
-  if (current_state_ == ControllerState::ROTATING) {
-    elapsed_ = (time - trial_start_time_).toSec();
-    max_excursion_ = std::max(max_excursion_, std::abs(offset));
-    // Back at the start after a real excursion, and settled there rather than
-    // just passing through it on the way to the other side.
-    if (max_excursion_ >= min_excursion_ && std::abs(offset) <= return_tolerance_ &&
-        command == PourCommand::NONE && dq7_d_ == 0.0) {
-      current_state_ = ControllerState::DONE;
-      ROS_INFO_STREAM("MindPourController: joint 7 back at its start angle, trial time "
-                      << elapsed_ << "s (largest excursion " << max_excursion_ * kRadToDeg
-                      << "deg). Commands are ignored from now on");
-    }
+  // Allow a deliberate stop inside the tolerance as well as a held return to home.
+  if (current_state_ == ControllerState::ROTATING && max_excursion_ >= min_excursion_ &&
+      std::abs(offset) <= return_tolerance_ && std::abs(q7_d_ - q7_start_) <= return_tolerance_ &&
+      (holding_start_ || command == PourCommand::NONE) && dq7_d_ == 0.0) {
+    current_state_ = ControllerState::DONE;
+    command = PourCommand::NONE;
+    ROS_INFO_STREAM("MindPourController: joint 7 back at its start angle, trial time "
+                    << elapsed_ << "s (largest excursion " << max_excursion_ * kRadToDeg
+                    << "deg). Commands are ignored from now on");
   }
 
   const double angle = clockwise_sign_ * offset;
@@ -196,6 +201,9 @@ void MindPourController::update(const ros::Time& time, const ros::Duration& peri
 }
 
 void MindPourController::stepJoint7(int velocity_sign, double dt) {
+  if (dt <= 0.0) {
+    return;
+  }
   double velocity_target = velocity_sign * angular_velocity_;
   // Never ask for more speed than can still be shed before the end of the
   // range, so the joint comes to rest on the limit instead of being stopped
@@ -205,12 +213,32 @@ void MindPourController::stepJoint7(int velocity_sign, double dt) {
   velocity_target = std::clamp(velocity_target, -max_down, max_up);
 
   const double max_step = max_acceleration_ * dt;
+  const double to_start = q7_start_ - q7_d_;
+  const bool returning = max_excursion_ >= min_excursion_ && to_start * velocity_target > 0.0;
+  if (returning) {
+    const double distance = std::abs(to_start);
+    // Reserve travel for this tick and the remaining braking distance, even
+    // if the next tick uses a different dt: v*dt + v*v/(2*a) <= distance.
+    const double braking = 2.0 * max_acceleration_ * distance;
+    const double speed = braking / (std::sqrt(max_step * max_step + braking) + max_step);
+    velocity_target = std::copysign(std::min(std::abs(velocity_target), speed), to_start);
+  }
+
   dq7_d_ += std::clamp(velocity_target - dq7_d_, -max_step, max_step);
   q7_d_ += dq7_d_ * dt;
 
   if (q7_d_ >= q7_upper_ || q7_d_ <= q7_lower_) {
     q7_d_ = std::clamp(q7_d_, q7_lower_, q7_upper_);
     dq7_d_ = 0.0;
+  }
+
+  if (returning) {
+    const double capture = std::min(kReturnCaptureDistance, 0.5 * return_tolerance_);
+    const double braking_distance = dq7_d_ * dq7_d_ / (2.0 * max_acceleration_);
+    if (std::abs(q7_d_ - q7_start_) <= capture && braking_distance <= capture) {
+      // Ignore further input and finish braking with the normal acceleration ramp.
+      holding_start_ = true;
+    }
   }
 }
 

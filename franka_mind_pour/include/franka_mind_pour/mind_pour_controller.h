@@ -33,8 +33,9 @@ namespace franka_mind_pour {
  *
  * The FSM is WAITING -> ROTATING -> DONE. The trial timer starts on the first
  * rotate command acted on and stops when joint 7 is back at its start angle
- * after a real excursion (see `min_excursion`, `return_tolerance`); from then
- * on commands are ignored and the arm holds still.
+ * after a real excursion (see `min_excursion`, `return_tolerance`). A return
+ * command brakes at the start angle even while held. The controller holds that
+ * angle while waiting for the measured position to settle.
  */
 class MindPourController : public controller_interface::MultiInterfaceController<
                                hardware_interface::PositionJointInterface> {
@@ -63,7 +64,8 @@ class MindPourController : public controller_interface::MultiInterfaceController
   /**
    * Advances q7_d_ / dq7_d_ by one tick towards `velocity_sign` *
    * angular_velocity_, acceleration-limited and braking early enough to come
-   * to rest inside [q7_lower_, q7_upper_].
+   * to rest inside [q7_lower_, q7_upper_]. After the minimum measured excursion,
+   * also stop at q7_start_ when a command points back towards it.
    */
   void stepJoint7(int velocity_sign, double dt);
 
@@ -98,6 +100,7 @@ class MindPourController : public controller_interface::MultiInterfaceController
   double q7_d_{0.0};
   double dq7_d_{0.0};
   double max_excursion_{0.0};  // largest |q7 - q7_start_| seen in ROTATING
+  bool holding_start_{false};  // finish braking at home, then wait for measured position
   ros::Time trial_start_time_;
   double elapsed_{0.0};
 };

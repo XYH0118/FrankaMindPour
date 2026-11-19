@@ -74,9 +74,9 @@ mind_pour_controller:
   clockwise_sign: 1
 
   # Trial timer: starts at the first rotate command acted on and stops once
-  # joint 7 has been at least min_excursion_deg away from its start angle and
-  # is back within return_tolerance_deg of it, with no command active and the
-  # joint commanded to rest. After that the controller ignores commands.
+  # joint 7 has been at least min_excursion_deg away and returns to rest within
+  # return_tolerance_deg of the start. A held return command brakes at the
+  # start angle and is ignored once the setpoint reaches it.
   min_excursion_deg: 10.0
   return_tolerance_deg: 2.0
 

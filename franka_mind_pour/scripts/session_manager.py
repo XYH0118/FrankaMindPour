@@ -148,6 +148,7 @@ def main():
     session = rospy.get_param('~session')
     results_file = os.path.expanduser(rospy.get_param('~results_file'))
     stage = rospy.get_param('~stage', 'full')
+    status_dir = os.environ.get('FMP_STATUS_DIR')
     if stage not in STAGES:
         rospy.logerr('session_manager: ~stage must be one of %s, got %r', STAGES, stage)
         return 1
@@ -163,6 +164,8 @@ def main():
     elif not move_to_start(pose, max_dq):
         return 1
     if stage == 'move':
+        if status_dir:
+            (Path(status_dir) / 'completed').touch()
         rospy.loginfo('session_manager: stage move, start pose reached, shutting down')
         return 0
 
@@ -171,7 +174,6 @@ def main():
         rospy.logerr('session_manager: could not switch to %s', POUR_CONTROLLER)
         return 1
     rate = rospy.Rate(20)
-    status_dir = os.environ.get('FMP_STATUS_DIR')
     if status_dir:
         # A successful switch alone does not prove update() is publishing.
         while not rospy.is_shutdown() and not monitor.waiting and not monitor.done:

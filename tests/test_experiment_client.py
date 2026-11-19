@@ -17,6 +17,45 @@ import test_experiment_manager as supervisor_tests
 
 
 class ClientTests(unittest.TestCase):
+    def test_managed_client_waits_for_connection_move_before_asking_for_ids(self):
+        with socket.socket() as listener:
+            listener.bind(('127.0.0.1', 0))
+            listener.listen()
+            listener.settimeout(3)
+            at_start = threading.Event()
+            received = []
+
+            def reply():
+                with listener.accept()[0] as connection, connection.makefile('rb') as reader:
+                    connection.settimeout(3)
+                    line = reader.readline().decode('ascii').strip()
+                    received.append(line)
+                    if not line.startswith('MOVE_TO_START,'):
+                        return
+                    request_id = line.split(',')[1]
+                    connection.sendall(('MOVING_TO_START,%s\n' % request_id).encode('ascii'))
+                    time.sleep(0.05)
+                    at_start.set()
+                    connection.sendall(('AT_START,%s\n' % request_id).encode('ascii'))
+                    received.append(reader.readline().decode('ascii').strip())
+                    connection.sendall(b'EXPERIMENT_FINISHED\n')
+
+            def prompt(_):
+                self.assertTrue(at_start.is_set(), 'IDs were requested while still moving')
+                return 'q'
+
+            thread = threading.Thread(target=reply, daemon=True)
+            thread.start()
+            self.addCleanup(thread.join, 3)
+            args = types.SimpleNamespace(host='127.0.0.1', tcp_port=listener.getsockname()[1],
+                                         port=5005, status=None, finish=False, participant=None,
+                                         session=None, request_id=None, startup_timeout=2)
+            with patch('builtins.input', side_effect=prompt), patch('builtins.print'):
+                result = sender_module.managed_experiment(args, lambda: None)
+            thread.join(3)
+            self.assertEqual(result, 0)
+            self.assertEqual(received[1:], ['FINISH_EXPERIMENT'])
+
     def test_status_command_waits_for_a_complete_response(self):
         self.assertTrue(hasattr(sender_module, 'managed_experiment'))
         with socket.socket() as listener:

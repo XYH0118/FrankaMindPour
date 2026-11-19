@@ -28,9 +28,10 @@ One call to `./scripts/run_session.sh` is one session:
    stops it at once, and a dropped packet is bridged.
 5. Joint 7 stays within ±`angle_limit_deg` of its start angle, and slows down so it comes to rest on
    the limit.
-6. The **timer stops** once joint 7 has been at least `min_excursion_deg` away and is back within
-   `return_tolerance_deg` of its start angle, with no command active and the joint at rest (`DONE`).
-   After that, commands are ignored.
+6. Once joint 7 has moved at least `min_excursion_deg` away, a return command automatically
+   slows to a stop at the start angle, even if the command is still held. The **timer stops**
+   when the setpoint is at rest and the measured angle is within `return_tolerance_deg` (`DONE`).
+   Releasing the command and stopping within the tolerance also completes the trial.
 7. The trial time is appended to `results.csv`, the bag is closed, and everything shuts down.
 
 ## Design choices
@@ -69,8 +70,8 @@ sender = CommandSender('192.168.50.2', 5005)
 sender.send(CLOCKWISE)
 ```
 
-Run directly, it now connects to the experiment manager, requests participant/session IDs,
-waits for `READY`, and plays a scripted pattern. By default it turns clockwise for 2 s and
+Run directly, it connects to the experiment manager, moves to the start pose, requests
+participant/session IDs, waits for `READY`, and plays a scripted pattern. It turns clockwise for 2 s and
 back for 2 s. Use `--udp-only` when testing an independently launched session or UDP bridge:
 
 ```bash
@@ -86,9 +87,10 @@ Build the updated package on Ubuntu, then start the persistent manager from the 
 python3 scripts/experiment_manager.py --host 192.168.50.2
 ```
 
-The manager listens on **TCP 5006**. It starts a new full `run_session.sh` for every accepted
-participant/session pair; do not separately launch another session. Starting the manager alone
-does not move the robot. An accepted START does: the arm first travels to its configured pose.
+The manager listens on **TCP 5006**. The Windows test client requests an initial move to the
+configured pose as soon as it connects. Then each accepted participant/session pair starts a
+full `run_session.sh`, which moves to that pose again before enabling EEG control. Keep the
+robot's path clear before opening the Windows client.
 If `ufw` is enabled, also allow TCP 5006 on the Windows link:
 `sudo ufw allow in on eno1 to any port 5006 proto tcp`.
 
@@ -99,14 +101,16 @@ On Windows, keep `fmp_udp_keyboard.bat`, `fmp_udp_keyboard.py`, and `fmp_udp_sen
 python fmp_udp_keyboard.py --host 192.168.50.2
 ```
 
-1. Enter a participant such as `P01`, then a session such as `0` (nonnegative integer).
+1. Wait for the initial move to finish, then enter a participant such as `P01` and a session such
+   as `0` (nonnegative integer). The initial move does not create a trial result or rosbag.
 2. Wait for `READY`. No UDP commands are sent before this response. It requires the start pose,
    a running controller publishing WAITING, and a bound UDP bridge.
 3. Hold **1** for clockwise or **2** for anti-clockwise. Release to send **0**. Holding 0,
    holding 1 and 2 together, or changing window focus also sends 0. These keys need no Enter.
-4. Send the opposite direction to return joint 7, then release the key near its starting angle.
-   **0 only stops; it does not return the arm automatically.** After task completion, result
-   writing, the final recording delay and child shutdown, `DONE` arrives and ID prompts return.
+4. Hold the opposite direction to return joint 7. After a qualifying excursion it slows and
+   stops at the starting angle automatically. Releasing the key away from the start pauses
+   motion. After result writing, the final recording delay and child shutdown, `DONE` arrives
+   and ID prompts return.
 5. At an ID prompt, enter **Q** to finish the experiment. During control, **Q/Esc** requests
    finish after this trial; keep using 1/2 to complete the return. Ctrl+C exits the local client
    and attempts stop packets, without declaring the experiment complete.
@@ -124,6 +128,8 @@ UDP 5005 keeps `sequence,command,sender_time\n`, normally at 50 Hz.
 
 | TCP message | Meaning |
 | --- | --- |
+| `MOVE_TO_START,m001` | Request the connection-time move before starting any trial |
+| `MOVING_TO_START,m001` / `AT_START,m001` | Move accepted / pose reached and move process exited |
 | `START,r001,P01,0` | Start a named trial; request IDs use 1–64 letters/digits/underscores/hyphens, excluding `-` alone |
 | `STARTING,r001,P01,0` | Accepted; preparing the robot |
 | `READY,r001,P01,0` | Begin UDP commands |
@@ -136,8 +142,8 @@ UDP 5005 keeps `sequence,command,sender_time\n`, normally at 50 Hz.
 
 Repeating an identical START with the same request ID replays its state; different metadata
 with that ID returns `request_conflict`. The ledger lasts for this manager process, not across
-restarts. Only one TCP client is connected at a time; after the first valid START, the manager
-accepts that Windows IP for subsequent connections. This restriction applies to management;
+restarts. Only one TCP client is connected at a time. The first accepted move or START binds
+the manager to that client's IP for subsequent connections. This restriction applies to management;
 the existing UDP bridge remains a trusted-link command receiver.
 
 If TCP disconnects, the client stops directional sending and the controller's normal 30 ms
@@ -145,6 +151,7 @@ command expiry decelerates the joint. The manager retains the unfinished trial. 
 `--status <original_id>` to inspect it, or supply **the original** `--request-id`, `--participant`
 and `--session` to resume that trial without starting it again. Prefer the keyboard client for
 manual recovery: the pattern client restarts its timed pattern when it receives READY.
+Status, finish, and trial recovery skip the connection-time move.
 Do not restart the manager or choose a new request ID as a recovery shortcut.
 
 The default manager startup timeout is 120 s; `--startup-timeout` changes it. The client
@@ -263,6 +270,8 @@ scripts/
 The experiment supervisor/client have robot-free integration tests. Run
 `python -m unittest discover -s tests -v` on Windows or Ubuntu. They use loopback TCP/UDP and
 fake child processes; ROS boundaries are stubbed. No coverage threshold or CI is configured.
+With a C++17 compiler on `PATH`, the suite also tests both directions of a held return with
+fixed and variable control periods. The return fix still needs validation on the robot.
 The new readiness handshake and actual ROS child shutdown still need Ubuntu/robot validation.
 
 The build is clean. The UDP path (sender → bridge → topic) has been tested on localhost. The

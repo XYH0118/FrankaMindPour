@@ -37,6 +37,27 @@ def load_node(name, rospy):
 
 
 class LifecycleTests(unittest.TestCase):
+    def test_move_stage_marks_success_only_after_reaching_start(self):
+        for success in (True, False):
+            with self.subTest(success=success), tempfile.TemporaryDirectory() as directory:
+                params = {'~joint_pose': {'joint': 1}, '~participant': 'debug', '~session': '0',
+                          '~stage': 'move', '~results_file': str(Path(directory) / 'results.csv')}
+                rospy = types.SimpleNamespace(init_node=lambda *a: None,
+                    get_param=lambda name, default=None: params.get(name, default),
+                    loginfo=lambda *a: None, logerr=lambda *a: None)
+                module = load_node('session_manager', rospy)
+                def move(pose, max_dq):
+                    self.assertEqual((pose, max_dq), ({'joint': 1}, 0.2))
+                    self.assertEqual(list(Path(directory).iterdir()), [])
+                    return success
+                with patch.dict(os.environ, {'FMP_STATUS_DIR': directory}), \
+                        patch.object(module, 'wait_for_controllers', return_value=True), \
+                        patch.object(module, 'move_to_start', side_effect=move) as moved:
+                    self.assertEqual(module.main(), 0 if success else 1)
+                moved.assert_called_once()
+                self.assertEqual([path.name for path in Path(directory).iterdir()],
+                                 ['completed'] if success else [])
+
     def test_bridge_discards_pre_ready_packets_then_preserves_payload(self):
         with tempfile.TemporaryDirectory() as directory:
             stopped = threading.Event()
@@ -112,13 +133,17 @@ class LifecycleTests(unittest.TestCase):
             module = load_node('session_manager', rospy)
             def switch():
                 self.assertFalse((Path(directory) / 'controller_ready').exists())
+                self.assertIn('move', observations)
+                return True
+            def move(pose, max_dq):
+                observations.append('move')
                 return True
             with patch.dict(os.environ, {'FMP_STATUS_DIR': directory}), \
                     patch.object(module, 'wait_for_controllers', return_value=True), \
-                    patch.object(module, 'move_to_start', return_value=True), \
+                    patch.object(module, 'move_to_start', side_effect=move), \
                     patch.object(module, 'switch_to_pour_controller', side_effect=switch):
                 self.assertEqual(module.main(), 0)
-            self.assertEqual(observations, ['delay'])
+            self.assertEqual(observations, ['move', 'delay'])
             self.assertTrue((Path(directory) / 'completed').exists(),
                             'Completed trial is not announced to supervisor')
 

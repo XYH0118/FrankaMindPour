@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """TCP experiment client and compatible UDP sender; standard library only.
 
-Default CLI: prompt for participant/session, wait for READY, play a pattern,
-wait for DONE, then prompt for the next trial. Enter Q at an ID prompt to finish.
+Default CLI: move to the start pose, prompt for participant/session, wait for
+READY, play a pattern, wait for DONE, then prompt for the next trial. Enter Q
+at an ID prompt to finish.
 Use --udp-only for the original UDP-only debug behavior. CommandSender's API
 and ASCII "<seq>,<command>,<sender_time>\\n" datagrams remain unchanged.
 """
@@ -48,6 +49,27 @@ class ExperimentClient:
 
     def _send(self, line):
         self._socket.sendall((line + '\n').encode('ascii'))
+
+    def move_to_start(self, timeout):
+        request_id = uuid.uuid4().hex
+        print('已连接 Ubuntu，正在请求机械臂移动到起始姿态。', flush=True)
+        self._send('MOVE_TO_START,' + request_id)
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            for line in self.poll(max(0, deadline - time.monotonic())):
+                fields = line.split(',', 2)
+                if len(fields) < 2 or fields[1] not in (request_id, '-'):
+                    continue
+                if fields[0] == 'AT_START':
+                    print('机械臂已到达起始姿态。', flush=True)
+                    return
+                if fields[0] == 'BUSY':
+                    raise RuntimeError('Ubuntu 上已有动作进行中。请等待结束或恢复原任务。')
+                if fields[0] == 'ERROR':
+                    if fields[1:] == [request_id, 'invalid_request']:
+                        raise RuntimeError('Ubuntu 管理程序需要更新，才能执行连接后回位。')
+                    raise RuntimeError('起始姿态移动失败 (%s)' % line)
+        raise TimeoutError('等待机械臂到达起始姿态超时 (%s)' % request_id)
 
     def start(self, participant, session, request_id=None):
         session = str(session)
@@ -241,6 +263,8 @@ def managed_experiment(args, command_factory):
             client.finish()
             return 0 if wait_experiment_finished(client) else 1
         participant, session, request_id = args.participant, args.session, args.request_id
+        if request_id is None:
+            client.move_to_start(args.startup_timeout)
         while True:
             participant = participant or input('受试者编号（如 P01；Q 结束全部实验）: ').strip()
             if participant.lower() in ('q', 'quit', 'finish'):

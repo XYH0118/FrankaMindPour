@@ -21,6 +21,7 @@ class Request:
     request_id: str
     participant: str
     session: str
+    stage: str = 'full'
 
 
 def trial_processes(directory, proc_root=Path('/proc')):
@@ -121,8 +122,10 @@ class ExperimentManager:
 
     def _status(self, record, state):
         request = record['request']
-        record['status'] = '%s,%s,%s,%s' % (state, request.request_id,
-                                          request.participant, request.session)
+        fields = [state, request.request_id]
+        if request.stage == 'full':
+            fields.extend((request.participant, request.session))
+        record['status'] = ','.join(fields)
         return record['status']
 
     def handle(self, line, peer):
@@ -139,11 +142,14 @@ class ExperimentManager:
         if len(parts) == 2 and parts[0] == 'STATUS' and request_id != '-':
             return [self.latest(request_id) if request_id in self.records
                     else 'ERROR,%s,unknown_request' % request_id]
-        if (len(parts) != 4 or parts[0] != 'START' or request_id == '-'
-                or not re.fullmatch(r'P[0-9]+', parts[2])
-                or not re.fullmatch(r'0|[1-9][0-9]*', parts[3])):
+        if request_id != '-' and len(parts) == 2 and parts[0] == 'MOVE_TO_START':
+            request = Request(request_id, 'debug', '0', stage='move')
+        elif (request_id != '-' and len(parts) == 4 and parts[0] == 'START'
+              and re.fullmatch(r'P[0-9]+', parts[2])
+              and re.fullmatch(r'0|[1-9][0-9]*', parts[3])):
+            request = Request(*parts[1:])
+        else:
             return ['ERROR,%s,invalid_request' % request_id]
-        request = Request(*parts[1:])
         if request_id in self.records:
             previous = self.records[request_id]
             return [previous['status'] if previous['request'] == request
@@ -167,35 +173,40 @@ class ExperimentManager:
         record['started'] = time.monotonic()
         record['ready'] = False
         self.active = record
-        return [self._status(record, 'STARTING')]
+        return [self._status(record, 'MOVING_TO_START' if request.stage == 'move' else 'STARTING')]
 
     def tick(self):
         record = self.active
         if record is None:
             return
         directory = Path(record['directory'].name)
+        request = record['request']
+        moving_only = request.stage == 'move'
         exit_code = record['process'].poll()
         error = None
         if exit_code is None:
-            if not record['ready']:
-                if all((directory / name).exists() for name in ('controller_ready', 'bridge_ready')):
-                    (directory / 'accept_commands').touch()
-                    record['ready'] = True
-                    self.events.append(self._status(record, 'READY'))
-                elif time.monotonic() - record['started'] > self.startup_timeout:
-                    error = 'startup_timeout'
+            if not moving_only and not record['ready'] and all(
+                    (directory / name).exists() for name in ('controller_ready', 'bridge_ready')):
+                (directory / 'accept_commands').touch()
+                record['ready'] = True
+                self.events.append(self._status(record, 'READY'))
+            if not record['ready'] and time.monotonic() - record['started'] > self.startup_timeout:
+                error = 'startup_timeout'
             if error is None:
                 return
         elif exit_code != 0:
             error = 'child_exit_%s' % exit_code
+        elif moving_only:
+            if not (directory / 'completed').exists():
+                error = 'incomplete_move'
         elif not record['ready'] or not (directory / 'completed').exists():
             error = 'incomplete_trial'
         record['process'].close(self.shutdown_timeout)
         record['directory'].cleanup()
         if error:
-            record['status'] = 'ERROR,%s,%s' % (record['request'].request_id, error)
+            record['status'] = 'ERROR,%s,%s' % (request.request_id, error)
         else:
-            self._status(record, 'DONE')
+            self._status(record, 'AT_START' if moving_only else 'DONE')
         self.events.append(record['status'])
         self.active = None
         if self.finishing:
@@ -316,10 +327,12 @@ def main():
     root = Path(__file__).resolve().parents[1]
 
     def launch(request, directory):
-        return SessionProcess(['bash', str(root / 'scripts/run_session.sh'),
-                               'participant:=' + request.participant,
-                               'session:=' + request.session, 'robot_ip:=' + args.robot_ip],
-                              directory, cwd=str(root))
+        command = ['bash', str(root / 'scripts/run_session.sh'), 'stage:=' + request.stage,
+                   'participant:=' + request.participant, 'session:=' + request.session,
+                   'robot_ip:=' + args.robot_ip]
+        if request.stage == 'move':
+            command.append('record:=false')
+        return SessionProcess(command, directory, cwd=str(root))
 
     manager = ExperimentManager(launch, startup_timeout=args.startup_timeout)
     server = ExperimentServer(manager, args.host, args.port)

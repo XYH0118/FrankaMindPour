@@ -54,8 +54,8 @@
   <node name="pour_controller_spawner" pkg="controller_manager" type="spawner" respawn="false"
         output="log" args="--stopped mind_pour_controller"/>
 
-  <node name="mind_pour_udp_bridge" pkg="franka_mind_pour" type="udp_bridge.py" output="screen"
-        required="true"/>
+  <node unless="$(eval arg('stage') == 'move')" name="mind_pour_udp_bridge"
+        pkg="franka_mind_pour" type="udp_bridge.py" output="screen" required="true"/>
 
   <!-- Its exit ends the session: required, so roslaunch then shuts everything
        down and rosbag closes the bag. -->
